@@ -1,0 +1,154 @@
+setwd("Path.....")
+
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(scater)
+library(BiocManager)
+
+
+# Load the dataset
+data <- Read10X(data.dir = "Path....Raw data") #Dataset taken from (eLife. 2019; 8: e47605) GEO ID: GSM3537044
+
+# Initialize the Seurat object with the raw (non-normalized data).
+NK <- CreateSeuratObject(counts = data, project = "eLife", min.cells = 3, min.features = 200)
+NK
+
+#QC and selecting cells for further analysis
+NK[["percent.mt"]] <- PercentageFeatureSet(NK, pattern = "^mt-")
+# Visualize QC metrics as a violin plot
+VlnPlot(NK, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+# Visualize QC metrics as scatter plot
+plot1 <- FeatureScatter(NK, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(NK, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+
+#remove low-quality cells
+NK_filtered <- subset(NK, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 10)
+
+#Apply sctransform and normalization
+NK_filtered <- SCTransform(NK_filtered, vars.to.regress = "percent.mt", method = "glmGamPoi", verbose = TRUE)
+
+#calculate cell cycle score for future regression (Gene list derived from Blood 2016 Aug 25;128(8):e20-31.)
+s.genes <- read.csv("S.genes.csv", sep =",")
+g2m.genes <- read.csv("g2m.csv", sep =",")
+NK_filtered <- CellCycleScoring(NK_filtered, s.features = c(s.genes$Gene), g2m.features = c(g2m.genes$Gene), set.ident = F)
+
+#Apply sctransform and normalization
+NK_filtered <- SCTransform(NK_filtered, vars.to.regress = c("percent.mt", "S.Score", "G2M.Score"), method = "glmGamPoi", verbose = TRUE)
+
+#Perform linear dimensional reduction
+NK_filtered <- RunPCA(NK_filtered, verbose = TRUE)
+DimPlot(NK_filtered, reduction = "pca")
+DimHeatmap(NK_filtered, dims = 1:15, cells = 500, balanced = TRUE, assays = "SCT")
+
+#Determine the 'dimensionality' of the dataset
+ElbowPlot(NK_filtered) #20 PCA are enought
+
+#Cluster the cells
+NK_filtered <- FindNeighbors(NK_filtered, dims = 1:20)
+NK_filtered <- FindClusters(NK_filtered, resolution = 0.6)
+
+#Run non-linear dimensional reduction (t-SNE)
+NK_processed <- RunTSNE(NK_processed, dims = 1:20)
+DimPlot(NK_processed, reduction = "tsne", label = F)
+
+#Number of cells per cluster
+table(Idents(NK_processed))
+
+#Finding differentially expressed features (cluster biomarkers)
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+DefaultAssay(NK_processed) <- "RNA"
+NK_processed <- NormalizeData(NK_processed)
+NK_processed.markers <- FindAllMarkers(NK_processed, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+NK_processed.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+
+#visualize top10 gene markers
+top10 <- NK_processed.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(NK_processed, features = top10$gene, assay = "SCT")
+
+#save the tables
+write.table(NK_processed.markers, file = sprintf("All_Clusters.xls"), quote=FALSE, sep="\t", row.names=TRUE)
+write.table(top10, file = sprintf("top10_Markers.xls"), quote=FALSE, sep="\t", row.names=TRUE)
+
+#Graphs utilized in the figure panels
+VlnPlot(NK_processed, features = c("Gzma", "Cd160","Cd7"), ncol = 3, pt.size = 0)
+RidgePlot(NK_processed, features = c("Gzma", "Cd160","Cd7"), ncol = 3)
+
+#gene scoring assignment (NK, ILC1, ILC2 and ILC3 from ImmGen Databrowser Microarray V2 dataset NK_CD49+_Lv - ILC1_CD49b-_Lv - ILC2_SI - ILC3_NKp46-_CD4-_SI, settings group A always group b never compared by mean A/mean B)
+DefaultAssay(NK_processed) <- "RNA"
+NK_signature <- read.csv("PopulationComparisonNKvsILC1liver.csv", sep = "\t")
+NK_signature <- NK_signature$Gene_Symbol
+NK_signature <- NK_signature[1:30]
+ILC1_signature <- read.csv("PopulationComparisonILC1vsNKliver.csv", sep = "\t")
+ILC1_signature <- ILC1_signature$Gene_Symbol
+ILC1_signature <- ILC1_signature[1:30]
+ILC2_signature <- read.csv("PopulationComparisonILC2.csv", sep = ",")
+ILC2_signature <- ILC2_signature$Gene_Symbol
+ILC2_signature <- ILC2_signature[1:30]
+ILC3_signature <- read.csv("PopulationComparisonILC3.csv", sep = ",")
+ILC3_signature <- ILC3_signature$Gene_Symbol
+ILC3_signature <- ILC3_signature[1:30]
+
+NK_list <- list(c(NK_signature))
+NK_processed <- AddModuleScore(object = NK_processed, features = NK_list, name = "NK_signature")
+VlnPlot(object = NK_processed, features = "NK_signature1", pt.size = 0)
+
+ILC1_signature <- list(c(ILC1_signature))
+NK_processed <- AddModuleScore(object = ILC_processed, features = ILC1_signature, name = "ILC1_signature")
+VlnPlot(object = ILC_processed, features = "ILC1_signature1", pt.size = 0)
+
+ILC2_signature <- list(c(ILC2_signature))
+ILC_processed <- AddModuleScore(object = ILC_processed, features = ILC2_signature, name = "ILC2_signature")
+VlnPlot(object = ILC_processed, features = "ILC2_signature1", pt.size = 0)
+
+ILC3_signature <- list(c(ILC3_signature))
+ILC_processed <- AddModuleScore(object = ILC_processed, features = ILC3_signature, name = "ILC3_signature")
+VlnPlot(object = ILC_processed, features = "ILC3_signature1", pt.size = 0)
+
+#extract only selected ILC1 cell clusters
+ILC <- subset(ILC_processed, idents = c("2"))
+rm(ILC_processed)
+#start again the analysis
+ILC <- SCTransform(ILC, vars.to.regress = c("percent.mt", "S.Score", "G2M.Score"), method = "glmGamPoi", verbose = TRUE, return.only.var.genes = FALSE)
+ILC <- RunPCA(ILC, verbose = TRUE)
+DimPlot(ILC, reduction = "pca")
+DimHeatmap(ILC, dims = 1:15, cells = 500, balanced = TRUE, assays = "SCT")
+
+#Determine the 'dimensionality' of the dataset
+ElbowPlot(ILC)
+
+#Cluster the cells
+ILC <- FindNeighbors(ILC, dims = 1:20)
+ILC <- FindClusters(ILC, resolution = 0.6)
+
+#Run non-linear dimensional reduction (t-SNE)
+ILC <- RunTSNE(ILC, dims = 1:20)
+DimPlot(ILC, reduction = "tsne", label = F)
+
+#save the object
+saveRDS(object = ILC, file = "ILC1.rds")
+
+#Number of cell per cluster
+table(Idents(ILC))
+
+#find specific cluster markers
+DefaultAssay(ILC) <- "RNA"
+ILC <- NormalizeData(ILC)
+ILC.markers <- FindAllMarkers(ILC, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+ILC.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+
+top10 <- ILC.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(ILC, features = top10$gene, assay = "SCT")
+
+write.table(ILC.markers, file = sprintf("ILC1_Clusters.xls"), quote=FALSE, sep="\t", row.names=TRUE)
+write.table(top10, file = sprintf("ILC1_top10_Markers.xls"), quote=FALSE, sep="\t", row.names=TRUE)
+
+
+
+
+
+
+
